@@ -1,0 +1,13 @@
+{
+  "name": "hanamikoji-t2-test",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "submit-test": "node test.js"
+  },
+  "devDependencies": {
+    "@assemblyscript/loader": "^0.28.10",
+    "assemblyscript": "^0.28.10"
+  }
+}
