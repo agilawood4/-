@@ -106,6 +106,18 @@ function normalizeChoice(s: string): string {
   return sortedString(body);
 }
 
+function cloneArea(src: Int32Array): Int32Array {
+  const out = new Int32Array(7);
+  for (let i: i32 = 0; i < 7; i++) out[i] = src[i];
+  return out;
+}
+
+function cloneUsed(src: Uint8Array): Uint8Array {
+  const out = new Uint8Array(5);
+  for (let i: i32 = 0; i < 5; i++) out[i] = src[i];
+  return out;
+}
+
 class ParsedState {
   selfArea: Int32Array;
   oppArea: Int32Array;
@@ -275,47 +287,78 @@ function inferSeat(history: Array<string>, cardsLen: i32): bool {
   return true;
 }
 
+function buildHandCount(cards: string): Int32Array {
+  const cnt = new Int32Array(7);
+  addLetters(cnt, cards);
+  return cnt;
+}
+
+function projectedOwner(idx: i32, selfArea: Int32Array, oppArea: Int32Array, board: Int8Array): i32 {
+  if (selfArea[idx] > oppArea[idx]) return 1;
+  if (selfArea[idx] < oppArea[idx]) return -1;
+  return board[idx];
+}
+
 function evaluatePosition(selfArea: Int32Array, oppArea: Int32Array, board: Int8Array): i32 {
   let myScore: i32 = 0;
   let oppScore: i32 = 0;
   let myCnt: i32 = 0;
   let oppCnt: i32 = 0;
-  let bonus: i32 = 0;
+  let val: i32 = 0;
 
   for (let i: i32 = 0; i < 7; i++) {
-    const diff = selfArea[i] - oppArea[i];
     const sc = SCORES[i];
-    if (diff > 0) {
+    const diff = selfArea[i] - oppArea[i];
+    const owner = projectedOwner(i, selfArea, oppArea, board);
+    const margin = diff >= 0 ? diff : -diff;
+
+    if (owner == 1) {
       myScore += sc;
       myCnt += 1;
-      bonus += diff * sc * 3;
-    } else if (diff < 0) {
+      val += sc * 22;
+      if (board[i] != 1) val += sc * 10;
+      if (diff > 0) val += margin * (sc * 4 + 2);
+      else val += sc * 4;
+    } else if (owner == -1) {
       oppScore += sc;
       oppCnt += 1;
-      bonus += diff * sc * 3;
+      val -= sc * 22;
+      if (board[i] != -1) val -= sc * 10;
+      if (diff < 0) val -= margin * (sc * 4 + 2);
+      else val -= sc * 4;
     } else {
-      if (board[i] == 1) {
-        myScore += sc;
-        myCnt += 1;
-      } else if (board[i] == -1) {
-        oppScore += sc;
-        oppCnt += 1;
+      if (board[i] == 0) {
+        val += 0;
       }
+    }
+
+    if (diff == 0) {
+      if (board[i] == 1) val += sc * 3;
+      else if (board[i] == -1) val -= sc * 3;
+    } else if (diff == 1) {
+      val += sc * 2;
+    } else if (diff == -1) {
+      val -= sc * 2;
     }
   }
 
-  let val = (myScore - oppScore) * 30 + (myCnt - oppCnt) * 60 + bonus;
-  if (myScore >= 11) val += 100000;
-  if (oppScore >= 11) val -= 100000;
-  if (myCnt >= 4 && oppScore < 11) val += 80000;
-  if (oppCnt >= 4 && myScore < 11) val -= 80000;
-  return val;
-}
+  val += (myScore - oppScore) * 45;
+  val += (myCnt - oppCnt) * 70;
 
-function buildHandCount(cards: string): Int32Array {
-  const cnt = new Int32Array(7);
-  addLetters(cnt, cards);
-  return cnt;
+  if (myScore >= 11) return 1000000 + val;
+  if (oppScore >= 11) return -1000000 + val;
+  if (myCnt >= 4 && oppScore < 11) return 900000 + val;
+  if (oppCnt >= 4 && myScore < 11) return -900000 + val;
+
+  if (myScore >= 9) val += 500;
+  else if (myScore >= 8) val += 250;
+  if (oppScore >= 9) val -= 500;
+  else if (oppScore >= 8) val -= 250;
+
+  if (myCnt >= 3) val += 300;
+  if (oppCnt >= 3) val -= 300;
+
+  return val;
 }
 
 function cardWeight(
@@ -327,18 +370,26 @@ function cardWeight(
 ): i32 {
   if (idx < 0 || idx >= 7) return -1000000;
 
-  let w = SCORES[idx] * 20;
+  const sc = SCORES[idx];
   const diff = selfArea[idx] - oppArea[idx];
+  let w = sc * 20;
 
   if (board[idx] == -1) w += 16;
   else if (board[idx] == 0) w += 10;
   else w += 6;
 
-  if (diff <= 0) w += 10;
-  else if (diff == 1) w += 4;
+  if (diff < 0) w += sc * 7;
+  else if (diff == 0) {
+    if (board[idx] == -1) w += sc * 6;
+    else if (board[idx] == 0) w += sc * 5;
+    else w += sc * 3;
+  } else if (diff == 1) {
+    w += sc * 2;
+  }
 
-  if (handCount[idx] >= 2) w += 3;
-  if (handCount[idx] >= 3) w += 3;
+  if (handCount[idx] >= 2) w += sc * 2;
+  if (handCount[idx] >= 3) w += sc * 2;
+
   return w;
 }
 
@@ -357,12 +408,75 @@ function weightOfLetters(
   return total;
 }
 
-function bestChoiceFor3(
-  body: string,
+function futurePotential(
+  cards: string,
+  used: Uint8Array,
   board: Int8Array,
   selfArea: Int32Array,
+  oppArea: Int32Array
+): i32 {
+  const handCount = buildHandCount(cards);
+  let total: i32 = 0;
+
+  for (let i: i32 = 0; i < 7; i++) {
+    const c = handCount[i];
+    if (c <= 0) continue;
+
+    const sc = SCORES[i];
+    const diff = selfArea[i] - oppArea[i];
+    let urg = sc * 2;
+
+    if (diff < 0) urg += sc * 6;
+    else if (diff == 0) {
+      if (board[i] == -1) urg += sc * 5;
+      else if (board[i] == 0) urg += sc * 4;
+      else urg += sc * 2;
+    } else if (diff == 1) {
+      urg += sc * 2;
+    }
+
+    if (board[i] == -1 && diff <= 0) urg += sc * 3;
+    if (board[i] == 1 && diff > 0) urg += sc;
+
+    total += c * urg;
+    if (c >= 2) total += sc * 2;
+    if (c >= 3) total += sc * 2;
+  }
+
+  const len = cards.length;
+  if (used[1] == 0 && len >= 1) total += 18;
+  if (used[2] == 0 && len >= 2) total += 12;
+  if (used[3] == 0 && len >= 3) total += 14;
+  if (used[4] == 0 && len >= 4) total += 16;
+
+  return total;
+}
+
+function evaluateCandidate(
+  selfArea: Int32Array,
   oppArea: Int32Array,
-  handCount: Int32Array
+  board: Int8Array,
+  cardsAfter: string,
+  usedAfter: Uint8Array
+): i32 {
+  const immediate = evaluatePosition(selfArea, oppArea, board);
+  const future = futurePotential(cardsAfter, usedAfter, board, selfArea, oppArea);
+
+  let phase: i32 = 0;
+  if (cardsAfter.length >= 5) phase = 3;
+  else if (cardsAfter.length >= 3) phase = 2;
+  else if (cardsAfter.length >= 1) phase = 1;
+
+  return immediate * 8 + future * phase;
+}
+
+function bestChoiceFor3(
+  body: string,
+  cards: string,
+  used: Uint8Array,
+  board: Int8Array,
+  selfArea: Int32Array,
+  oppArea: Int32Array
 ): string {
   let best = "";
   let bestScore: i32 = -2147483648;
@@ -372,18 +486,18 @@ function bestChoiceFor3(
     const idx = charToIndex(c);
     if (idx < 0) continue;
 
-    const ns = new Int32Array(7);
-    const no = new Int32Array(7);
-    for (let j: i32 = 0; j < 7; j++) {
-      ns[j] = selfArea[j];
-      no[j] = oppArea[j];
-    }
+    const ns = cloneArea(selfArea);
+    const no = cloneArea(oppArea);
     ns[idx] += 1;
     const rest = removeLetters(body, c);
     addLetters(no, rest);
 
-    let sc = evaluatePosition(ns, no, board);
-    sc += cardWeight(idx, board, selfArea, oppArea, handCount);
+    let sc = evaluateCandidate(ns, no, board, cards, used);
+    sc += SCORES[idx] * 8;
+    if (projectedOwner(idx, ns, no, board) == 1 && projectedOwner(idx, selfArea, oppArea, board) != 1) {
+      sc += SCORES[idx] * 12;
+    }
+
     if (sc > bestScore) {
       bestScore = sc;
       best = c;
@@ -396,28 +510,31 @@ function bestChoiceFor3(
 
 function bestChoiceFor4(
   body: string,
+  cards: string,
+  used: Uint8Array,
   board: Int8Array,
   selfArea: Int32Array,
-  oppArea: Int32Array,
-  handCount: Int32Array
+  oppArea: Int32Array
 ): string {
   if (body.length < 4) return "-AB";
+
   const g1 = sortedString(body.substring(0, 2));
   const g2 = sortedString(body.substring(2, 4));
 
-  const ns1 = new Int32Array(7);
-  const no1 = new Int32Array(7);
-  const ns2 = new Int32Array(7);
-  const no2 = new Int32Array(7);
-  for (let j: i32 = 0; j < 7; j++) {
-    ns1[j] = selfArea[j]; no1[j] = oppArea[j];
-    ns2[j] = selfArea[j]; no2[j] = oppArea[j];
-  }
-  addLetters(ns1, g1); addLetters(no1, g2);
-  addLetters(ns2, g2); addLetters(no2, g1);
+  const ns1 = cloneArea(selfArea);
+  const no1 = cloneArea(oppArea);
+  addLetters(ns1, g1);
+  addLetters(no1, g2);
+  let s1 = evaluateCandidate(ns1, no1, board, cards, used);
+  s1 += weightOfLetters(g1, board, selfArea, oppArea, buildHandCount(cards));
 
-  let s1 = evaluatePosition(ns1, no1, board) + weightOfLetters(g1, board, selfArea, oppArea, handCount);
-  let s2 = evaluatePosition(ns2, no2, board) + weightOfLetters(g2, board, selfArea, oppArea, handCount);
+  const ns2 = cloneArea(selfArea);
+  const no2 = cloneArea(oppArea);
+  addLetters(ns2, g2);
+  addLetters(no2, g1);
+  let s2 = evaluateCandidate(ns2, no2, board, cards, used);
+  s2 += weightOfLetters(g2, board, selfArea, oppArea, buildHandCount(cards));
+
   return s1 >= s2 ? "-" + g1 : "-" + g2;
 }
 
@@ -495,60 +612,6 @@ function generateCompetitionPayloads(cards: string): Array<string> {
   return out;
 }
 
-function evaluateSingle(
-  card: string,
-  board: Int8Array,
-  selfArea: Int32Array,
-  oppArea: Int32Array,
-  handCount: Int32Array
-): i32 {
-  return cardWeight(charToIndex(card), board, selfArea, oppArea, handCount) + 8;
-}
-
-function evaluateDiscard(
-  two: string,
-  board: Int8Array,
-  selfArea: Int32Array,
-  oppArea: Int32Array,
-  handCount: Int32Array
-): i32 {
-  return 120 - weightOfLetters(two, board, selfArea, oppArea, handCount);
-}
-
-function evaluateGift(
-  three: string,
-  board: Int8Array,
-  selfArea: Int32Array,
-  oppArea: Int32Array,
-  handCount: Int32Array
-): i32 {
-  let total = weightOfLetters(three, board, selfArea, oppArea, handCount);
-  let maxSingle: i32 = 0;
-  for (let i: i32 = 0; i < three.length; i++) {
-    const idx = charToIndex(three.charAt(i));
-    if (idx < 0) continue;
-    const one = cardWeight(idx, board, selfArea, oppArea, handCount);
-    if (one > maxSingle) maxSingle = one;
-  }
-  return total - maxSingle + 10;
-}
-
-function evaluateCompetition(
-  payload: string,
-  board: Int8Array,
-  selfArea: Int32Array,
-  oppArea: Int32Array,
-  handCount: Int32Array
-): i32 {
-  const g1 = payload.substring(0, 2);
-  const g2 = payload.substring(2, 4);
-  const s1 = weightOfLetters(g1, board, selfArea, oppArea, handCount);
-  const s2 = weightOfLetters(g2, board, selfArea, oppArea, handCount);
-  const minv = s1 < s2 ? s1 : s2;
-  const diff = s1 > s2 ? s1 - s2 : s2 - s1;
-  return minv * 2 - diff + 14;
-}
-
 function actionValidForSeat(
   history: Array<string>,
   cards: string,
@@ -574,10 +637,12 @@ function actionValidForSeat(
   }
 
   if (st.actorToMove != selfPlayer) return false;
+
   const kind = action.charCodeAt(0) - 48;
   if (kind < 1 || kind > 4) return false;
   if (action.length - 1 != kind) return false;
   if (st.used[kind] != 0) return false;
+
   return bodyInCards(cards, action.substring(1));
 }
 
@@ -607,8 +672,8 @@ function chooseActionForSeat(
 
   if (st.pending) {
     if (st.responder != selfPlayer) return "";
-    if (st.pendingKind == 3) return bestChoiceFor3(st.pendingBody, board, selfArea, oppArea, handCount);
-    if (st.pendingKind == 4) return bestChoiceFor4(st.pendingBody, board, selfArea, oppArea, handCount);
+    if (st.pendingKind == 3) return bestChoiceFor3(st.pendingBody, cards, st.used, board, selfArea, oppArea);
+    if (st.pendingKind == 4) return bestChoiceFor4(st.pendingBody, cards, st.used, board, selfArea, oppArea);
     return "";
   }
 
@@ -621,7 +686,21 @@ function chooseActionForSeat(
     const singles = generateSingles(cards);
     for (let i: i32 = 0; i < singles.length; i++) {
       const c = singles[i];
-      const score = evaluateSingle(c, board, selfArea, oppArea, handCount);
+      const idx = charToIndex(c);
+      if (idx < 0) continue;
+
+      const ns = cloneArea(selfArea);
+      ns[idx] += 1;
+      const usedAfter = cloneUsed(st.used);
+      usedAfter[1] = 1;
+      const cardsAfter = removeLetters(cards, c);
+
+      let score = evaluateCandidate(ns, oppArea, board, cardsAfter, usedAfter);
+      score += 25 + SCORES[idx] * 8;
+      if (projectedOwner(idx, ns, oppArea, board) == 1 && projectedOwner(idx, selfArea, oppArea, board) != 1) {
+        score += SCORES[idx] * 14;
+      }
+
       if (score > bestScore) {
         bestScore = score;
         bestAction = "1" + c;
@@ -633,7 +712,13 @@ function chooseActionForSeat(
     const twos = generateCombos(cards, 2);
     for (let i: i32 = 0; i < twos.length; i++) {
       const s = twos[i];
-      const score = evaluateDiscard(s, board, selfArea, oppArea, handCount);
+      const usedAfter = cloneUsed(st.used);
+      usedAfter[2] = 1;
+      const cardsAfter = removeLetters(cards, s);
+
+      let score = evaluateCandidate(selfArea, oppArea, board, cardsAfter, usedAfter);
+      score -= weightOfLetters(s, board, selfArea, oppArea, handCount) * 3;
+
       if (score > bestScore) {
         bestScore = score;
         bestAction = "2" + s;
@@ -645,7 +730,35 @@ function chooseActionForSeat(
     const threes = generateCombos(cards, 3);
     for (let i: i32 = 0; i < threes.length; i++) {
       const s = threes[i];
-      const score = evaluateGift(s, board, selfArea, oppArea, handCount);
+      const usedAfter = cloneUsed(st.used);
+      usedAfter[3] = 1;
+      const cardsAfter = removeLetters(cards, s);
+
+      let worst: i32 = 2147483647;
+      let sum: i32 = 0;
+      let cnt: i32 = 0;
+
+      for (let j: i32 = 0; j < s.length; j++) {
+        const c = s.charAt(j);
+        const idx = charToIndex(c);
+        if (idx < 0) continue;
+
+        const ns = cloneArea(selfArea);
+        const no = cloneArea(oppArea);
+
+        no[idx] += 1;
+        const rest = removeLetters(s, c);
+        addLetters(ns, rest);
+
+        const sc = evaluateCandidate(ns, no, board, cardsAfter, usedAfter);
+        if (sc < worst) worst = sc;
+        sum += sc;
+        cnt += 1;
+      }
+
+      const avg = cnt > 0 ? sum / cnt : worst;
+      const score = worst * 8 + avg;
+
       if (score > bestScore) {
         bestScore = score;
         bestAction = "3" + s;
@@ -657,7 +770,34 @@ function chooseActionForSeat(
     const fours = generateCompetitionPayloads(cards);
     for (let i: i32 = 0; i < fours.length; i++) {
       const p = fours[i];
-      const score = evaluateCompetition(p, board, selfArea, oppArea, handCount);
+      const usedAfter = cloneUsed(st.used);
+      usedAfter[4] = 1;
+      const cardsAfter = removeLetters(cards, p);
+
+      const g1 = p.substring(0, 2);
+      const g2 = p.substring(2, 4);
+
+      const ns1 = cloneArea(selfArea);
+      const no1 = cloneArea(oppArea);
+      addLetters(no1, g1);
+      addLetters(ns1, g2);
+      const sc1 = evaluateCandidate(ns1, no1, board, cardsAfter, usedAfter);
+
+      const ns2 = cloneArea(selfArea);
+      const no2 = cloneArea(oppArea);
+      addLetters(no2, g2);
+      addLetters(ns2, g1);
+      const sc2 = evaluateCandidate(ns2, no2, board, cardsAfter, usedAfter);
+
+      const worst = sc1 < sc2 ? sc1 : sc2;
+      const avg = (sc1 + sc2) / 2;
+      let score = worst * 8 + avg;
+
+      const g1v = weightOfLetters(g1, board, selfArea, oppArea, handCount);
+      const g2v = weightOfLetters(g2, board, selfArea, oppArea, handCount);
+      const diff = g1v > g2v ? g1v - g2v : g2v - g1v;
+      score -= diff * 2;
+
       if (score > bestScore) {
         bestScore = score;
         bestAction = "4" + p;
@@ -687,10 +827,13 @@ export function hanamikoji_action_raw(
 
   const st = parseHistory(history, inferred);
   if (st.pending) {
-    if (st.pendingKind == 3 && st.pendingBody.length >= 1) return "-" + st.pendingBody.charAt(0);
-    if (st.pendingKind == 4 && st.pendingBody.length >= 2) return "-" + sortedString(st.pendingBody.substring(0, 2));
+    if (st.pendingKind == 3 && st.pendingBody.length >= 1) {
+      return "-" + st.pendingBody.charAt(0);
+    }
+    if (st.pendingKind == 4 && st.pendingBody.length >= 2) {
+      return "-" + sortedString(st.pendingBody.substring(0, 2));
+    }
   }
 
   return fallbackAction(cards, st.used);
 }
-
